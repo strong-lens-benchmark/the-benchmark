@@ -1,0 +1,63 @@
+[project]
+name = "benchmark"
+version = "0.1.0"
+description = "Benchmarking strong lens modelling on the GPU"
+requires-python = ">=3.12"
+dependencies = [
+    # Lens modelling codes — editable installs from org forks
+    "lenstronomy",
+    "jaxtronomy",
+    "autolens",
+    "autofit",
+    "autoarray",
+    "autogalaxy",
+    "herculens",
+    "tinylensgpu",
+
+    # JAX ecosystem
+    "jax[cuda12]>=0.7.0",
+    "jaxlib>=0.7.0",
+    "blackjax",           # editable install from nested_sampling fork
+    "optax>=0.2.5",
+    "numpyro>=0.20.0",
+    "caskade",
+
+    # Scientific stack
+    "numpy>=2.0.0",
+    "scipy>=1.10.0",
+    "astropy>=5.0.0",
+
+    # Samplers
+    "nautilus-sampler>=1.0.5",
+    "dynesty>=2.0.0",
+    "emcee>=3.0.0",
+    "ultranest>=3.6.2",
+
+    # NSS dependencies
+    "distrax>=0.1.5",
+    "arviz>=0.22.0",
+
+    # Utilities
+    "matplotlib>=3.7.0",
+    "corner>=2.2.0",
+    "tqdm>=4.61.0",
+    "pyyaml>=6.0",
+    "h5py",
+]
+
+[tool.uv.sources]
+caskade      = { path = "../caskade", editable = true }
+autofit      = { git = "https://github.com/PyAutoLabs/PyAutoFit",    tag = "2026.4.13.6" }
+autoarray    = { git = "https://github.com/PyAutoLabs/PyAutoArray",  branch = "main" }
+autogalaxy   = { git = "https://github.com/PyAutoLabs/PyAutoGalaxy", branch = "main" }
+lenstronomy  = { path = "../lenstronomy",  editable = true }
+jaxtronomy   = { path = "../JAXtronomy",   editable = true }
+autolens     = { path = "../PyAutoLens",   editable = true }
+herculens    = { path = "../herculens",    editable = true }
+tinylensgpu  = { path = "../TinyLensGpu",  editable = true }
+blackjax     = { path = "../blackjax",     editable = true }
+
+[tool.uv]
+extra-index-url = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]
+environments = ["sys_platform == 'linux'"]
+override-dependencies = ["anesthetic>=2.9.0"]
