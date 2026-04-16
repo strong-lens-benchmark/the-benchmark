@@ -57,6 +57,12 @@ herculens    = { path = "../herculens",    editable = true }
 tinylensgpu  = { path = "../TinyLensGpu",  editable = true }
 blackjax     = { path = "../blackjax",     editable = true }
 
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "nbconvert>=7.17.1",
+]
+
 [tool.uv]
 extra-index-url = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]
 environments = ["sys_platform == 'linux'"]
