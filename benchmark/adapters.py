@@ -213,8 +213,14 @@ class PyAutoLensAdapter:
 
     def lens_light(self, x: np.ndarray, y: np.ndarray, params: SersicLightParams):
         import autolens as al
+        from autoarray.structures.grids.irregular_2d import Grid2DIrregular
 
-        grid = _autolens_grid(x, y)
+        # Grid2DIrregular skips autolens's @aa.over_sample decorator, giving
+        # point-evaluation at pixel centres to match lenstronomy's convention.
+        # Grid2D.no_mask() would use pixel-averaged sub-grids computed from the
+        # mask (with y-flipped coordinates), producing a systematically wrong image.
+        values = np.stack([y.ravel(), x.ravel()], axis=-1)
+        grid = Grid2DIrregular(values=values)
         light = al.lp.Sersic(
             centre=(params.center_y, params.center_x),
             ell_comps=(params.e2, params.e1),

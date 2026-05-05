@@ -6,5 +6,6 @@ __all__ = [
     "manifest",
     "nautilus",
     "params",
+    "plotting",
     "solver",
 ]

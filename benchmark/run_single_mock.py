@@ -19,12 +19,14 @@ if __package__ in (None, ""):
     from benchmark.data import load_mock
     from benchmark.nautilus import run_nautilus
     from benchmark.params import BenchmarkParams, EPLShearParams, InversionConfig, SourceGridConfig
+    from benchmark.plotting import write_diagnostics
     from benchmark.solver import evaluate_model
 else:
     from .adapters import get_adapter
     from .data import load_mock
     from .nautilus import run_nautilus
     from .params import BenchmarkParams, EPLShearParams, InversionConfig, SourceGridConfig
+    from .plotting import write_diagnostics
     from .solver import evaluate_model
 
 
@@ -62,6 +64,7 @@ def main() -> None:
     parser.add_argument("--n-like-max", type=int, default=None)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--plot-dir", default=None)
     args = parser.parse_args()
 
     mock = load_mock(args.dataset, args.index)
@@ -128,6 +131,19 @@ def main() -> None:
             fit_info = {"success": None, "message": "evaluated at catalogue truth", "nfev": 1}
         result = evaluate_model(adapter, mock, params, source_grid, inversion)
         elapsed = time.perf_counter() - started
+        if args.plot_dir:
+            write_diagnostics(
+                args.plot_dir,
+                adapter.name,
+                mock,
+                result,
+                (
+                    source_grid.x_min,
+                    source_grid.x_max,
+                    source_grid.y_min,
+                    source_grid.y_max,
+                ),
+            )
         output["results"][adapter.name] = {
             "params": asdict(params),
             "fit": fit_info,

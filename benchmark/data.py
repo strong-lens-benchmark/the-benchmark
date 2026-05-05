@@ -25,6 +25,7 @@ class MockImage:
     psf_kernel: np.ndarray
     truth_row: dict[str, float]
     truth_params: BenchmarkParams
+    source_truth: dict | None
     kwargs_data: dict
     kwargs_psf: dict
     kwargs_numerics: dict
@@ -41,6 +42,7 @@ def load_mock(dataset: str = "test_simple", index: int = 0) -> MockImage:
     psf_kernel = make_psf_kernel(kwargs_psf)
     noise_map = make_noise_map(image, kwargs_data)
     truth_row = truth.iloc[index].to_dict()
+    source_truth = load_source_truth(dataset, index)
 
     return MockImage(
         dataset=dataset,
@@ -52,6 +54,7 @@ def load_mock(dataset: str = "test_simple", index: int = 0) -> MockImage:
         psf_kernel=psf_kernel,
         truth_row=truth_row,
         truth_params=params_from_truth(truth_row),
+        source_truth=source_truth,
         kwargs_data=kwargs_data,
         kwargs_psf=kwargs_psf,
         kwargs_numerics=kwargs_numerics,
@@ -96,3 +99,13 @@ def make_psf_kernel(kwargs_psf: dict) -> np.ndarray:
     yy, xx = np.mgrid[-radius : radius + 1, -radius : radius + 1]
     kernel = np.exp(-0.5 * (xx**2 + yy**2) / sigma_pix**2)
     return kernel / np.sum(kernel)
+
+
+def load_source_truth(dataset: str, index: int) -> dict | None:
+    path = DATASET_ROOT / f"{dataset}_source_truth.pickle"
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        source_truth = pickle.load(handle)
+    matches = [entry for entry in source_truth if int(entry.get("image_index", -1)) == index]
+    return matches[0] if matches else None
