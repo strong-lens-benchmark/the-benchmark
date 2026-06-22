@@ -402,6 +402,7 @@ class AutolensAdapter:
 
         numpix = cfg.image.numpix
         dpix = cfg.image.dpix
+        self._numpix = numpix
 
         mask = aa.Mask2D.all_false(
             shape_native=(numpix, numpix),
@@ -451,9 +452,13 @@ class AutolensAdapter:
         import jax.numpy as jnp
         from jax.scipy.signal import fftconvolve
 
+        # image_2d_from returns autolens's 1D "slim" representation; reshape to
+        # the 2D native grid before convolving (matches the native-pixsrc adapter,
+        # which does np.asarray(fit.model_data).reshape(mock.image.shape)).
         image = self._tracer.image_2d_from(grid=self._grid, xp=jnp)
+        image_2d = jnp.asarray(image).reshape(self._numpix, self._numpix)
         psf = jnp.asarray(self._psf_kernel)
-        return fftconvolve(jnp.asarray(image), psf, mode="same")
+        return fftconvolve(image_2d, psf, mode="same")
 
 
 # ---------------------------------------------------------------------------
