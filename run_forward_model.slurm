@@ -15,6 +15,11 @@ cd ~/org/the-benchmark
 
 mkdir -p results
 
+# Add nvidia pip wheel libs to LD_LIBRARY_PATH so JAX/XLA can find cuDNN etc.
+for d in .venv/lib/python3.14/site-packages/nvidia/*/lib; do
+    export LD_LIBRARY_PATH="${d}:${LD_LIBRARY_PATH:-}"
+done
+
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: ${SLURMD_NODENAME}"
 echo "Date: $(date)"
