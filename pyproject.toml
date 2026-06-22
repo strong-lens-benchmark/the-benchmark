@@ -66,4 +66,4 @@ dev = [
 [tool.uv]
 extra-index-url = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]
 environments = ["sys_platform == 'linux'"]
-override-dependencies = ["anesthetic>=2.9.0"]
+override-dependencies = ["anesthetic>=2.9.0", "nvidia-cudnn-cu12>=9.8,<10"]
