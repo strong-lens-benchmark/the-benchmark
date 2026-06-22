@@ -387,6 +387,76 @@ class TinyLensGpuAdapter:
 
 
 # ---------------------------------------------------------------------------
+# autolens  (JAX / GPU)
+# ---------------------------------------------------------------------------
+
+class AutolensAdapter:
+    name = "autolens"
+    is_jax = True
+
+    def __init__(self, cfg: ForwardModelConfig) -> None:
+        import jax
+        jax.config.update("jax_enable_x64", True)
+        import autoarray as aa
+        import autolens as al
+
+        numpix = cfg.image.numpix
+        dpix = cfg.image.dpix
+
+        mask = aa.Mask2D.all_false(
+            shape_native=(numpix, numpix),
+            pixel_scales=dpix,
+        )
+        self._grid = aa.Grid2D.from_mask(mask=mask)
+        self._psf_kernel = make_psf_kernel(cfg.image)
+
+        lens = cfg.lens
+        ll = cfg.lens_light
+        src = cfg.source
+
+        # autolens ell_comps convention: (ell_comps_0, ell_comps_1) = (e2, e1)
+        lens_galaxy = al.Galaxy(
+            redshift=0.5,
+            mass=al.mp.PowerLaw(
+                centre=(lens.center_y, lens.center_x),
+                ell_comps=(lens.e2, lens.e1),
+                einstein_radius=lens.theta_E,
+                slope=lens.gamma,
+            ),
+            shear=al.mp.ExternalShear(
+                gamma_1=lens.gamma1,
+                gamma_2=lens.gamma2,
+            ),
+            light=al.lp.Sersic(
+                centre=(ll.center_y, ll.center_x),
+                ell_comps=(ll.e2, ll.e1),
+                effective_radius=ll.R_sersic,
+                sersic_index=ll.n_sersic,
+                intensity=ll.amp,
+            ),
+        )
+        source_galaxy = al.Galaxy(
+            redshift=2.0,
+            light=al.lp.Sersic(
+                centre=(src.center_y, src.center_x),
+                ell_comps=(src.e2, src.e1),
+                effective_radius=src.R_sersic,
+                sersic_index=src.n_sersic,
+                intensity=src.amp,
+            ),
+        )
+        self._tracer = al.Tracer(galaxies=[lens_galaxy, source_galaxy])
+
+    def __call__(self):
+        import jax.numpy as jnp
+        from jax.scipy.signal import fftconvolve
+
+        image = self._tracer.image_2d_from(grid=self._grid, xp=jnp)
+        psf = jnp.asarray(self._psf_kernel)
+        return fftconvolve(jnp.asarray(image), psf, mode="same")
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -395,6 +465,7 @@ ADAPTERS: dict[str, type] = {
     "jaxtronomy": JAXtronomyAdapter,
     "herculens": HerculensAdapter,
     "tinylensgpu": TinyLensGpuAdapter,
+    "autolens": AutolensAdapter,
 }
 
 

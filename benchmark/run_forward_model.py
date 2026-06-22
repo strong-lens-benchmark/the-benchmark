@@ -34,7 +34,7 @@ else:
         ADAPTERS, get_adapter, time_adapter,
     )
 
-_DEFAULT_ADAPTERS = "lenstronomy,jaxtronomy,herculens,tinylensgpu"
+_DEFAULT_ADAPTERS = "lenstronomy,jaxtronomy,herculens,tinylensgpu,autolens"
 
 
 def _jax_device_info() -> str:
