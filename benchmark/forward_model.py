@@ -44,7 +44,7 @@ class ImageConfig:
 @dataclass(frozen=True)
 class LensConfig:
     theta_E: float = 1.0
-    gamma: float = 2.0
+    gamma: float = 2.1
     e1: float = 0.1
     e2: float = 0.05
     gamma1: float = 0.02
@@ -69,7 +69,7 @@ class ForwardModelConfig:
     image: ImageConfig = field(default_factory=ImageConfig)
     lens: LensConfig = field(default_factory=LensConfig)
     lens_light: SersicConfig = field(default_factory=lambda: SersicConfig(
-        amp=1.0, R_sersic=0.5, n_sersic=4.0, e1=0.1, e2=0.05,
+        amp=1.0, R_sersic=1.0, n_sersic=4.0, e1=0.1, e2=0.05,
     ))
     source: SersicConfig = field(default_factory=lambda: SersicConfig(
         amp=1.0, R_sersic=0.2, n_sersic=1.0, e1=0.05, e2=0.02,
