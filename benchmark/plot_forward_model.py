@@ -62,39 +62,74 @@ def plot_timings(timed: dict, cfg: dict, out: Path) -> None:
     print(f"wrote {out}")
 
 
-def _image_grid(images: dict, out: Path, title: str, residual_ref: str | None = None) -> None:
+def _image_grid(images: dict, out: Path, title: str, residual_ref: str | None = None,
+                shared: bool = False) -> None:
+    """Plot a grid of images (or residuals vs ``residual_ref``).
+
+    ``shared=True`` puts every panel on one common colour scale with a single
+    figure-wide colourbar (good for comparing magnitudes across codes).
+    ``shared=False`` autoscales each panel and gives it its own colourbar
+    (good for inspecting the structure of small residuals).
+    """
     names = list(images)
     n = len(names)
     ncols = min(n, 3)
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows),
+                             squeeze=False, constrained_layout=True)
 
     ref = np.asarray(images[residual_ref]) if residual_ref else None
+    cmap = "RdBu_r" if ref is not None else "magma"
 
+    # build the data each panel will show
+    panels = {}
+    for name in names:
+        img = np.asarray(images[name])
+        if ref is not None and img.shape != ref.shape:
+            panels[name] = None  # shape mismatch, handled below
+        else:
+            panels[name] = (img - ref) if ref is not None else img
+
+    # shared colour limits across all valid panels
+    svmin = svmax = None
+    if shared:
+        valid = [d for d in panels.values() if d is not None]
+        if ref is not None:
+            svmax = max((np.abs(d).max() for d in valid), default=1.0)
+            svmin = -svmax
+        else:
+            svmax = max((d.max() for d in valid), default=1.0)
+            svmin = min((d.min() for d in valid), default=0.0)
+
+    im = None
     for i, name in enumerate(names):
         ax = axes[i // ncols][i % ncols]
-        img = np.asarray(images[name])
-        if ref is not None:
-            if img.shape != ref.shape:
-                ax.set_title(f"{name}\n(shape {img.shape} != ref)")
-                ax.axis("off")
-                continue
-            data = img - ref
-            im = ax.imshow(data, origin="lower", cmap="RdBu_r",
-                           vmin=-np.abs(data).max(), vmax=np.abs(data).max())
-            ax.set_title(f"{name} - {residual_ref}")
+        data = panels[name]
+        if data is None:
+            ax.set_title(f"{name}\n(shape != ref)")
+            ax.axis("off")
+            continue
+        if shared:
+            vmin, vmax = svmin, svmax
+        elif ref is not None:
+            vmax = np.abs(data).max(); vmin = -vmax
         else:
-            im = ax.imshow(img, origin="lower", cmap="magma")
-            ax.set_title(name)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            vmin = vmax = None
+        im = ax.imshow(data, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_title(f"{name} - {residual_ref}" if ref is not None else name)
         ax.set_xticks([]); ax.set_yticks([])
+        if not shared:
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     # hide any unused panels
     for j in range(n, nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
 
+    # one shared colourbar for the whole figure
+    if shared and im is not None:
+        fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.046, pad=0.04)
+
     fig.suptitle(title)
-    fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"wrote {out}")
@@ -125,10 +160,17 @@ def main() -> None:
     if npz_path.exists():
         with np.load(npz_path) as npz:
             images = {k: npz[k] for k in npz.files}
-        _image_grid(images, outdir / f"{stem}_images.png", "Model images")
+        _image_grid(images, outdir / f"{stem}_images.png",
+                    "Model images", shared=False)
+        _image_grid(images, outdir / f"{stem}_images_shared.png",
+                    "Model images (shared colourbar)", shared=True)
         if args.ref in images:
             _image_grid(images, outdir / f"{stem}_residuals.png",
-                        f"Residuals (adapter - {args.ref})", residual_ref=args.ref)
+                        f"Residuals (adapter - {args.ref})",
+                        residual_ref=args.ref, shared=False)
+            _image_grid(images, outdir / f"{stem}_residuals_shared.png",
+                        f"Residuals (adapter - {args.ref}, shared colourbar)",
+                        residual_ref=args.ref, shared=True)
         else:
             print(f"note: reference '{args.ref}' not in images; skipping residuals")
     else:

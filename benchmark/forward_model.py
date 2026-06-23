@@ -19,6 +19,12 @@ jaxtronomy, and TinyLensGpu.  The conversion is:
     R_sersic_ma = R_sersic_pa / sqrt(q),  q = (1 - e) / (1 + e)
 
 This is applied at construction time and requires no modification to herculens.
+
+A second convention difference is the image normalisation: herculens's
+LensImage.model() returns flux-per-pixel (it multiplies the convolved image by
+the pixel area, pixel_width**2), whereas the other adapters return surface
+brightness (no pixel-area weighting).  The herculens adapter divides its output
+by the pixel area so all adapters emit the same surface-brightness convention.
 """
 
 from __future__ import annotations
@@ -255,6 +261,7 @@ class HerculensAdapter:
 
         numpix = cfg.image.numpix
         dpix = cfg.image.dpix
+        self._pixel_area = dpix ** 2
         psf_kernel = make_psf_kernel(cfg.image)
 
         ra_at_xy_0 = -(numpix / 2 - 0.5) * dpix
@@ -302,11 +309,17 @@ class HerculensAdapter:
         }]
 
     def __call__(self):
+        # herculens's LensImage.model() multiplies the convolved image by the
+        # pixel area (re_size_convolve returns image_conv * pixel_width**2), i.e.
+        # it returns flux-per-pixel.  The other adapters return surface brightness
+        # (no pixel-area weighting; the PSF is sum-normalised).  Divide by the
+        # pixel area here so every adapter emits the same surface-brightness
+        # convention and image residuals are directly comparable.
         return self._lens_image.model(
             kwargs_lens=self._kwargs_lens,
             kwargs_source=self._kwargs_source,
             kwargs_lens_light=self._kwargs_ll,
-        )
+        ) / self._pixel_area
 
 
 # ---------------------------------------------------------------------------
