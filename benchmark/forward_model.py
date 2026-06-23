@@ -4,27 +4,37 @@ Each adapter pre-builds all persistent objects at construction time so that
 __call__() contains only the computation to be timed: ray-tracing, light
 evaluation, and PSF convolution.
 
-JAX-backed adapters (jaxtronomy, herculens, TinyLensGpu):
+Each code renders the image with its OWN native image-simulation API and its
+OWN PSF convolution, built from a Gaussian of the configured FWHM -- the
+out-of-the-box path a user of that code would take:
+  - lenstronomy / jaxtronomy : ImSim.image_model.ImageModel.image()
+  - herculens                : LensImage.model()
+  - TinyLensGpu              : LensSimulator.simulate()
+  - autolens                 : SimulatorImaging.via_tracer_from()
+(jaxtronomy's GAUSSIAN psf_type is broken out of the box, so it is given the
+Gaussian kernel as a PIXEL PSF and still convolves it internally.)
+
+JAX-backed adapters (jaxtronomy, herculens, TinyLensGpu, autolens):
   - Call the adapter once before timing to trigger JIT compilation.
   - Use jax.block_until_ready(result) before stopping the clock so that
     asynchronous GPU dispatch does not undercount execution time.
 
-Parameter conventions
----------------------
-All adapters use the same physical parameters. The only convention difference
-is herculens's SERSIC_ELLIPSE, which parameterises R_sersic as the semi-major
-axis (R_sersic_ma) rather than the product-average radius used by lenstronomy,
-jaxtronomy, and TinyLensGpu.  The conversion is:
+Parameter / output conventions
+------------------------------
+All adapters use the same physical parameters. Two convention differences are
+reconciled in the adapters:
 
-    R_sersic_ma = R_sersic_pa / sqrt(q),  q = (1 - e) / (1 + e)
+1. herculens's SERSIC_ELLIPSE parameterises R_sersic as the semi-major axis
+   (R_sersic_ma) rather than the product-average radius used by the others:
+       R_sersic_ma = R_sersic_pa / sqrt(q),  q = (1 - e) / (1 + e)
 
-This is applied at construction time and requires no modification to herculens.
+2. Image normalisation. lenstronomy/jaxtronomy (ImageModel) and herculens
+   (LensImage.model) all return flux-per-pixel (surface brightness * pixel
+   area).  TinyLensGpu.simulate() returns surface brightness, so its adapter
+   multiplies by the pixel area to match the shared flux-per-pixel convention.
 
-A second convention difference is the image normalisation: herculens's
-LensImage.model() returns flux-per-pixel (it multiplies the convolved image by
-the pixel area, pixel_width**2), whereas the other adapters return surface
-brightness (no pixel-area weighting).  The herculens adapter divides its output
-by the pixel area so all adapters emit the same surface-brightness convention.
+Both are applied at construction/output time and require no modification to the
+underlying codes.
 """
 
 from __future__ import annotations
@@ -87,19 +97,6 @@ class ForwardModelConfig:
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def make_image_grid(cfg: ImageConfig) -> tuple[np.ndarray, np.ndarray]:
-    coords = (np.arange(cfg.numpix) - (cfg.numpix - 1) / 2.0) * cfg.dpix
-    return np.meshgrid(coords, coords)
-
-
-def make_psf_kernel(cfg: ImageConfig, truncation: float = 3.0) -> np.ndarray:
-    sigma_pix = cfg.psf_fwhm / 2.354820045 / cfg.dpix
-    radius = max(1, int(np.ceil(truncation * sigma_pix)))
-    yy, xx = np.mgrid[-radius: radius + 1, -radius: radius + 1]
-    kernel = np.exp(-0.5 * (xx ** 2 + yy ** 2) / sigma_pix ** 2)
-    return kernel / kernel.sum()
-
-
 def _herculens_R_sersic_ma(s: SersicConfig) -> float:
     """Convert product-average R_sersic to herculens semi-major axis convention."""
     e = float(np.hypot(s.e1, s.e2))
@@ -127,15 +124,29 @@ class LenstronomyAdapter:
     is_jax = False
 
     def __init__(self, cfg: ForwardModelConfig) -> None:
+        from lenstronomy.ImSim.image_model import ImageModel
+        from lenstronomy.Data.imaging_data import ImageData
+        from lenstronomy.Data.psf import PSF
         from lenstronomy.LensModel.lens_model import LensModel
         from lenstronomy.LightModel.light_model import LightModel
+        from lenstronomy.Util import simulation_util as sim_util
 
-        self._x, self._y = make_image_grid(cfg.image)
-        self._psf = make_psf_kernel(cfg.image)
+        numpix = cfg.image.numpix
+        dpix = cfg.image.dpix
 
-        self._lens_model = LensModel(["EPL", "SHEAR"])
-        self._source_model = LightModel(["SERSIC_ELLIPSE"])
-        self._ll_model = LightModel(["SERSIC_ELLIPSE"])
+        # Native image rendering with lenstronomy's own Gaussian PSF convolution.
+        kwargs_data = sim_util.data_configure_simple(numpix, dpix)
+        data = ImageData(**kwargs_data)
+        psf = PSF(psf_type="GAUSSIAN", fwhm=cfg.image.psf_fwhm, pixel_size=dpix)
+
+        self._image_model = ImageModel(
+            data_class=data,
+            psf_class=psf,
+            lens_model_class=LensModel(["EPL", "SHEAR"]),
+            source_model_class=LightModel(["SERSIC_ELLIPSE"]),
+            lens_light_model_class=LightModel(["SERSIC_ELLIPSE"]),
+            kwargs_numerics={"supersampling_factor": 1},
+        )
 
         lens = cfg.lens
         self._kwargs_lens = [
@@ -160,17 +171,9 @@ class LenstronomyAdapter:
         }]
 
     def __call__(self) -> np.ndarray:
-        from scipy.signal import fftconvolve
-
-        beta_x, beta_y = self._lens_model.ray_shooting(
-            self._x, self._y, self._kwargs_lens
-        )
-        source = self._source_model.surface_brightness(beta_x, beta_y, self._kwargs_source)
-        ll = self._ll_model.surface_brightness(self._x, self._y, self._kwargs_ll)
-        model = fftconvolve(
-            np.asarray(source) + np.asarray(ll), self._psf, mode="same"
-        )
-        return np.asarray(model)
+        return np.asarray(self._image_model.image(
+            self._kwargs_lens, self._kwargs_source, self._kwargs_ll
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -184,18 +187,35 @@ class JAXtronomyAdapter:
     def __init__(self, cfg: ForwardModelConfig) -> None:
         import jax
         jax.config.update("jax_enable_x64", True)
-        import jax.numpy as jnp
+        from jaxtronomy.ImSim.image_model import ImageModel
+        from jaxtronomy.Data.imaging_data import ImageData
         from jaxtronomy.LensModel.lens_model import LensModel
         from jaxtronomy.LightModel.light_model import LightModel
+        # jaxtronomy reuses lenstronomy's PSF and data-configuration utilities.
+        from lenstronomy.Data.psf import PSF
+        from lenstronomy.Util import simulation_util as sim_util
 
-        x, y = make_image_grid(cfg.image)
-        self._x = jnp.asarray(x)
-        self._y = jnp.asarray(y)
-        self._psf = jnp.asarray(make_psf_kernel(cfg.image))
+        numpix = cfg.image.numpix
+        dpix = cfg.image.dpix
 
-        self._lens_model = LensModel(["EPL", "SHEAR"])
-        self._source_model = LightModel(["SERSIC_ELLIPSE"])
-        self._ll_model = LightModel(["SERSIC_ELLIPSE"])
+        # Native image rendering with jaxtronomy's own Gaussian PSF convolution.
+        # jaxtronomy's ImageData requires noise/exposure parameters even though
+        # only .image() (no noise) is used here; the dummy values do not affect
+        # the rendered image.
+        kwargs_data = sim_util.data_configure_simple(
+            numpix, dpix, exposure_time=1.0, background_rms=1.0,
+        )
+        data = ImageData(**kwargs_data)
+        psf = PSF(psf_type="GAUSSIAN", fwhm=cfg.image.psf_fwhm, pixel_size=dpix)
+
+        self._image_model = ImageModel(
+            data_class=data,
+            psf_class=psf,
+            lens_model_class=LensModel(["EPL", "SHEAR"]),
+            source_model_class=LightModel(["SERSIC_ELLIPSE"]),
+            lens_light_model_class=LightModel(["SERSIC_ELLIPSE"]),
+            kwargs_numerics={"supersampling_factor": 1},
+        )
 
         lens = cfg.lens
         self._kwargs_lens = [
@@ -220,18 +240,12 @@ class JAXtronomyAdapter:
         }]
 
     def __call__(self):
-        import jax.numpy as jnp
-        from jax.scipy.signal import fftconvolve
-
-        beta_x, beta_y = self._lens_model.ray_shooting(
-            self._x, self._y, self._kwargs_lens
+        # point_source_add=False: there are no point sources, and jaxtronomy's
+        # image() otherwise enters its point-source rendering path unconditionally.
+        return self._image_model.image(
+            self._kwargs_lens, self._kwargs_source, self._kwargs_ll,
+            point_source_add=False,
         )
-        source = self._source_model.surface_brightness(beta_x, beta_y, self._kwargs_source)
-        ll = self._ll_model.surface_brightness(self._x, self._y, self._kwargs_ll)
-        model = fftconvolve(
-            jnp.asarray(source) + jnp.asarray(ll), self._psf, mode="same"
-        )
-        return model
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +275,6 @@ class HerculensAdapter:
 
         numpix = cfg.image.numpix
         dpix = cfg.image.dpix
-        self._pixel_area = dpix ** 2
-        psf_kernel = make_psf_kernel(cfg.image)
 
         ra_at_xy_0 = -(numpix / 2 - 0.5) * dpix
         dec_at_xy_0 = -(numpix / 2 - 0.5) * dpix
@@ -272,7 +284,8 @@ class HerculensAdapter:
             ra_at_xy_0=ra_at_xy_0,
             dec_at_xy_0=dec_at_xy_0,
         )
-        psf = PSF(psf_type="PIXEL", kernel_point_source=psf_kernel)
+        # Native Gaussian PSF (herculens builds and convolves it internally).
+        psf = PSF(psf_type="GAUSSIAN", fwhm=cfg.image.psf_fwhm, pixel_size=dpix)
 
         self._lens_image = LensImage(
             grid_class=grid,
@@ -309,17 +322,15 @@ class HerculensAdapter:
         }]
 
     def __call__(self):
-        # herculens's LensImage.model() multiplies the convolved image by the
-        # pixel area (re_size_convolve returns image_conv * pixel_width**2), i.e.
-        # it returns flux-per-pixel.  The other adapters return surface brightness
-        # (no pixel-area weighting; the PSF is sum-normalised).  Divide by the
-        # pixel area here so every adapter emits the same surface-brightness
-        # convention and image residuals are directly comparable.
+        # herculens's LensImage.model() returns flux-per-pixel (re_size_convolve
+        # ends with image_conv * pixel_width**2).  lenstronomy's and jaxtronomy's
+        # ImageModel.image() use the same flux-per-pixel convention, so herculens
+        # needs no rescaling to be directly comparable.
         return self._lens_image.model(
             kwargs_lens=self._kwargs_lens,
             kwargs_source=self._kwargs_source,
             kwargs_lens_light=self._kwargs_ll,
-        ) / self._pixel_area
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +345,10 @@ class TinyLensGpuAdapter:
         import jax
         jax.config.update("jax_enable_x64", True)
 
-        from TinyLensGpu.ForwardSimulation.LensImage.config import SimulatorConfig
+        from TinyLensGpu.ForwardSimulation.LensImage.config import SimulatorConfig, make_grid_2d
         from TinyLensGpu.ForwardSimulation.LensImage.parametric import LensSimulator
         from TinyLensGpu.PhysicalModel.LensImage.Parametric.Light import SersicEllipse
+        from TinyLensGpu.PhysicalModel.LensImage.Parametric.Light.gaussian import GaussianEllipse
         from TinyLensGpu.PhysicalModel.LensImage.Parametric.Mass.epl import EPL
         from TinyLensGpu.PhysicalModel.LensImage.Parametric.Mass.shear import Shear
         from TinyLensGpu.PhysicalModel.LensImage.composite import PhysicalModel
@@ -387,16 +399,32 @@ class TinyLensGpuAdapter:
             source_light=[source],
             lens_light=[lens_light],
         )
+        # Native Gaussian PSF kernel built with TinyLensGpu's own GaussianEllipse
+        # profile (matching its demo sim_data.py), convolved internally by simulate().
+        sigma = cfg.image.psf_fwhm / 2.3548200450309493  # FWHM -> sigma
+        psf_radius = max(1, int(np.ceil(3.0 * sigma / cfg.image.dpix)))
+        psf_npix = 2 * psf_radius + 1
+        x_psf, y_psf = make_grid_2d(psf_npix, cfg.image.dpix)
+        psf_kernel = GaussianEllipse(
+            flux=1.0, sigma=sigma, e1=0.0, e2=0.0, center_x=0.0, center_y=0.0,
+        ).light(x=x_psf, y=y_psf)
+        psf_kernel = np.asarray(psf_kernel)
+        psf_kernel = psf_kernel / psf_kernel.sum()
+
         sim_config = SimulatorConfig(
             dpix=cfg.image.dpix,
             npix=cfg.image.numpix,
-            psf_kernel=make_psf_kernel(cfg.image),
+            psf_kernel=psf_kernel,
             nsub=1,
         )
         self._simulator = LensSimulator(phys_model=phys_model, sim_config=sim_config)
+        self._pixel_area = cfg.image.dpix ** 2
 
     def __call__(self):
-        return self._simulator.simulate(use_linear=False)
+        # TinyLensGpu.simulate() returns surface brightness (no pixel-area
+        # weighting), whereas lenstronomy/jaxtronomy/herculens return
+        # flux-per-pixel.  Multiply by the pixel area to match that convention.
+        return self._simulator.simulate(use_linear=False) * self._pixel_area
 
 
 # ---------------------------------------------------------------------------
@@ -417,12 +445,17 @@ class AutolensAdapter:
         dpix = cfg.image.dpix
         self._numpix = numpix
 
-        mask = aa.Mask2D.all_false(
-            shape_native=(numpix, numpix),
-            pixel_scales=dpix,
+        self._grid = aa.Grid2D.uniform(shape_native=(numpix, numpix), pixel_scales=dpix)
+
+        # Native Gaussian PSF built with autolens's own Kernel2D.from_gaussian.
+        sigma = cfg.image.psf_fwhm / 2.3548200450309493  # FWHM -> sigma
+        psf_radius = max(1, int(np.ceil(3.0 * sigma / dpix)))
+        psf_npix = 2 * psf_radius + 1
+        psf = aa.Kernel2D.from_gaussian(
+            shape_native=(psf_npix, psf_npix), pixel_scales=dpix,
+            sigma=sigma, normalize=True,
         )
-        self._grid = aa.Grid2D.from_mask(mask=mask)
-        self._psf_kernel = make_psf_kernel(cfg.image)
+        self._simulator = al.SimulatorImaging(psf=psf, add_poisson_noise=False)
 
         lens = cfg.lens
         ll = cfg.lens_light
@@ -463,15 +496,13 @@ class AutolensAdapter:
 
     def __call__(self):
         import jax.numpy as jnp
-        from jax.scipy.signal import fftconvolve
-
-        # image_2d_from returns autolens's 1D "slim" representation; reshape to
-        # the 2D native grid before convolving (matches the native-pixsrc adapter,
-        # which does np.asarray(fit.model_data).reshape(mock.image.shape)).
-        image = self._tracer.image_2d_from(grid=self._grid, xp=jnp)
-        image_2d = jnp.asarray(image).reshape(self._numpix, self._numpix)
-        psf = jnp.asarray(self._psf_kernel)
-        return fftconvolve(image_2d, psf, mode="same")
+        # SimulatorImaging.via_tracer_from renders via autolens's own imaging
+        # pipeline (its Convolver PSF + over-sampling) and returns the image in
+        # the data array's orientation, so no manual reshape/flip is needed.
+        dataset = self._simulator.via_tracer_from(
+            tracer=self._tracer, grid=self._grid, xp=jnp,
+        )
+        return jnp.asarray(dataset.data.native)
 
 
 # ---------------------------------------------------------------------------
